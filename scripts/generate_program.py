@@ -31,7 +31,6 @@ def normalize(s):
 def extract_date(text):
     text = text.lower()
 
-    # ISO dates
     m = re.search(r"\b(20\d{2})-(\d{1,2})-(\d{1,2})\b", text)
     if m:
         try:
@@ -40,7 +39,6 @@ def extract_date(text):
         except ValueError:
             pass
 
-    # Dutch textual dates, e.g. zaterdag 28 november 2026
     for month, number in MONTHS.items():
         m = re.search(rf"\b(\d{{1,2}})\s+{month}\s+(20\d{{2}})\b", text)
         if m:
@@ -50,7 +48,6 @@ def extract_date(text):
             except ValueError:
                 pass
 
-    # dd-mm-yyyy / dd/mm/yyyy
     m = re.search(r"\b(\d{1,2})[-/](\d{1,2})[-/](20\d{2})\b", text)
     if m:
         try:
@@ -58,6 +55,7 @@ def extract_date(text):
                             int(m.group(1))).date()
         except ValueError:
             pass
+
     return None
 
 def fetch_page():
@@ -77,13 +75,11 @@ def extract_rows(html):
     soup = BeautifulSoup(html, "html.parser")
     rows = []
 
-    # Standard table rows
     for tr in soup.find_all("tr"):
         text = normalize(tr.get_text(" ", strip=True))
         if text:
             rows.append(text)
 
-    # Common card/list elements on dynamic sports pages
     selectors = [
         "[class*='wedstrijd']",
         "[class*='match']",
@@ -97,12 +93,27 @@ def extract_rows(html):
             if text and len(text) < 500:
                 rows.append(text)
 
-    # Remove duplicates
     return list(dict.fromkeys(rows))
+
+def is_home_match(row):
+    # Controleer of Juliana aan de linkerzijde van
+    # een wedstrijdscheiding staat.
+    separators = r"\s+(?:-|–|—|vs\.?|tegen)\s+"
+
+    parts = re.split(separators, row, maxsplit=1,
+                     flags=re.IGNORECASE)
+
+    if len(parts) < 2:
+        return False
+
+    home_team = parts[0].strip().lower()
+
+    return "juliana" in home_team
 
 def main():
     matches = []
     errors = []
+    diagnostic_rows = []
 
     try:
         html = fetch_page()
@@ -113,30 +124,26 @@ def main():
             days=int(CFG.get("lookahead_days", 7))
         )
 
-        club_keys = [x.lower() for x in CFG.get(
-            "filter_keywords", ["Juliana"]
-        )]
-
-        venue_keys = [x.lower() for x in CFG.get(
-            "venue_keywords", ["Veerhuis", "Oud Gastel"]
-        )]
-
         for row in rows:
-            low = row.lower()
-
-            if not any(k in low for k in club_keys):
-                continue
-
-            if not any(k in low for k in venue_keys):
-                continue
-
             date_value = extract_date(row)
 
-            if date_value and not (today <= date_value <= end_date):
+            diagnostic_rows.append({
+                "raw": row,
+                "date": str(date_value) if date_value else None,
+                "home_match": is_home_match(row)
+            })
+
+            if not is_home_match(row):
+                continue
+
+            if not date_value:
+                continue
+
+            if not (today <= date_value <= end_date):
                 continue
 
             matches.append({
-                "date": str(date_value) if date_value else "",
+                "date": str(date_value),
                 "raw": row
             })
 
@@ -148,11 +155,16 @@ def main():
 
     render(matches, errors)
 
+    (OUT / "diagnostics.json").write_text(
+        json.dumps(diagnostic_rows, ensure_ascii=False, indent=2),
+        encoding="utf-8"
+    )
+
 def render(matches, errors):
     if matches:
         rows = "".join(
             f'<article class="match">'
-            f'<div class="date">{m["date"] or "Datum onbekend"}</div>'
+            f'<div class="date">{m["date"]}</div>'
             f'<div class="details">{m["raw"]}</div>'
             f'</article>'
             for m in matches
@@ -169,7 +181,7 @@ def render(matches, errors):
     else:
         rows = (
             '<div class="empty">'
-            'Geen wedstrijden gevonden in de geselecteerde periode.'
+            'Geen thuiswedstrijden gevonden in de komende 7 dagen.'
             '</div>'
         )
         status = '<div class="status">Programma automatisch bijgewerkt</div>'
@@ -232,12 +244,6 @@ font-weight:700}}
     (OUT / "index.html").write_text(html, encoding="utf-8")
     (OUT / "matches.json").write_text(
         json.dumps(matches, ensure_ascii=False, indent=2),
-        encoding="utf-8"
-    )
-
-    # Save the raw source rows as diagnostic data
-    (OUT / "diagnostics.json").write_text(
-        json.dumps(errors, ensure_ascii=False, indent=2),
         encoding="utf-8"
     )
 
