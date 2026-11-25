@@ -1,12 +1,8 @@
+
 {
-  "source_url": "https://mijn.korfbal.nl/clubs/details/NCX25G5/programma",
-  "filter_keywords": [
-    "Juliana"
-  ],
-  "venue_keywords": [
-    "Veerhuis",
-    "Oud Gastel"
-  ],
+  "source_url": "https://mijn.korfbal.nl/competitie-vereniging/?club=NCX25G5",
+  "filter_keywords": ["Juliana"],
+  "venue_keywords": ["Veerhuis", "Oud Gastel"],
   "lookahead_days": 7,
   "timezone": "Europe/Amsterdam",
   "club_name": "KV Juliana",
