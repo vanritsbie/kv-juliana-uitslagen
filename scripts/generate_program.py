@@ -20,6 +20,10 @@ MONTHS = {
     "aug": 8, "sep": 9, "okt": 10, "nov": 11, "dec": 12,
 }
 
+MAX_MATCHES_PER_PAGE = 5
+PAGE_INTERVAL_SECONDS = 8
+
+
 def parse_date(value, today):
     value = value.lower().strip()
 
@@ -43,6 +47,7 @@ def parse_date(value, today):
             except ValueError:
                 return None
     return None
+
 
 def get_rows():
     with sync_playwright() as p:
@@ -72,16 +77,18 @@ def get_rows():
 
     return rows, html
 
+
 def find_matches(rows, today):
     matches = []
     diagnostics = []
     end_date = today + timedelta(days=int(CFG.get("lookahead_days", 7)))
 
-    # Vind de header met de kolommen DATUM, TIJD, THUIS en UIT
     header = None
     for cells in rows:
         normalized = [c.strip().lower() for c in cells]
-        if any("thuis" in c for c in normalized) and any("uit" == c or c.endswith(" uit") for c in normalized):
+        if any("thuis" in c for c in normalized) and any(
+            "uit" == c or c.endswith(" uit") for c in normalized
+        ):
             header = normalized
             break
 
@@ -139,24 +146,62 @@ def find_matches(rows, today):
     matches.sort(key=lambda x: (x["date"], x["time"]))
     return matches, diagnostics
 
+
 def render(matches):
-    if matches:
-        rows_html = "".join(
-            f"""<article class="match">
-            <div class="date">{m["date"]}</div>
-            <div class="time">{m["time"]}</div>
-            <div class="teams">{m["home"]} <span>–</span> {m["away"]}</div>
-            </article>"""
-            for m in matches
+    # Wedstrijden groeperen per wedstrijddag
+    grouped = {}
+    for m in matches:
+        grouped.setdefault(m["date"], []).append(m)
+
+    day_html = ""
+
+    for datum, day_matches in grouped.items():
+        chunks = [
+            day_matches[i:i + MAX_MATCHES_PER_PAGE]
+            for i in range(0, len(day_matches), MAX_MATCHES_PER_PAGE)
+        ]
+
+        pages_html = ""
+
+        for page_index, chunk in enumerate(chunks):
+            match_rows = "".join(
+                f"""<article class="match">
+                    <div class="time">{m["time"]}</div>
+                    <div class="teams">{m["home"]}
+                    <span>–</span> {m["away"]}</div>
+                </article>"""
+                for m in chunk
+            )
+
+            pages_html += f"""
+            <div class="page {'active' if page_index == 0 else ''}">
+                {match_rows}
+            </div>
+            """
+
+        page_label = (
+            f'<div class="page-label">Pagina 1/{len(chunks)}</div>'
+            if len(chunks) > 1 else ""
         )
-        status = ""
-    else:
-        rows_html = """
+
+        day_html += f"""
+        <section class="day" data-pages="{len(chunks)}">
+            <div class="day-header">
+                <h2>{datum}</h2>
+                {page_label}
+            </div>
+            <div class="pages">
+                {pages_html}
+            </div>
+        </section>
+        """
+
+    if not matches:
+        day_html = """
         <div class="empty">
-        Geen thuiswedstrijden gevonden in de komende 7 dagen.
+        Op dit moment zijn er geen thuiswedstrijden gevonden.
         </div>
         """
-        status = '<div class="status">Programma automatisch bijgewerkt</div>'
 
     html = f"""<!DOCTYPE html>
 <html lang="nl">
@@ -167,32 +212,64 @@ def render(matches):
 <title>KV Juliana thuisprogramma</title>
 <style>
 *{{box-sizing:border-box}}
+
 body{{margin:0;background:#f6f8fc;color:#15345c;
 font-family:Arial,Helvetica,sans-serif}}
-main{{width:100vw;height:100vh;padding:4vw 5vw;
-display:flex;flex-direction:column;gap:2vh;overflow:hidden}}
+
+main{{width:100vw;height:100vh;padding:3vw 4vw;
+display:flex;flex-direction:column;gap:1.5vh;overflow:hidden}}
+
 header{{display:flex;align-items:center;gap:2vw;
 border-bottom:5px solid #f58200;padding-bottom:1.5vh}}
+
 .brand{{font-size:clamp(20px,3vw,52px);font-weight:900;
 letter-spacing:.04em}}
+
 h1{{font-size:clamp(26px,4vw,64px);margin:0}}
+
 .subtitle{{font-size:clamp(14px,2vw,32px);
 font-weight:700;color:#f58200}}
-.list{{display:flex;flex-direction:column;gap:1.2vh;overflow:hidden}}
-.match{{display:flex;align-items:center;gap:2vw;background:white;
-border-left:1vw solid #f58200;padding:2vh 2vw;border-radius:10px;
-box-shadow:0 2px 10px #0001;font-size:clamp(16px,2.3vw,36px)}}
-.date{{font-weight:900;min-width:15vw}}
-.time{{font-weight:700;min-width:8vw;color:#f58200}}
+
+.content{{flex:1;min-height:0;overflow:auto;
+display:flex;flex-direction:column;gap:1.5vh}}
+
+.day{{background:white;border-radius:12px;padding:1.5vh 1.5vw;
+box-shadow:0 2px 10px #0001}}
+
+.day-header{{display:flex;justify-content:space-between;
+align-items:center;border-bottom:2px solid #f58200;
+padding-bottom:1vh;margin-bottom:1vh}}
+
+.day-header h2{{margin:0;font-size:clamp(20px,2.6vw,40px)}}
+
+.page-label{{color:#f58200;font-size:clamp(14px,1.5vw,24px);
+font-weight:700}}
+
+.pages{{position:relative}}
+
+.page{{display:none}}
+
+.page.active{{display:block}}
+
+.match{{display:flex;align-items:center;gap:2vw;
+background:#f6f8fc;border-left:1vw solid #f58200;
+padding:1.3vh 1.5vw;border-radius:8px;margin-bottom:1vh;
+font-size:clamp(16px,2.2vw,34px)}}
+
+.time{{font-weight:900;min-width:8vw;color:#f58200}}
+
 .teams{{font-weight:700}}
+
 .teams span{{color:#f58200;padding:0 .5em}}
+
 .empty{{font-size:clamp(22px,3vw,44px);padding:5vh;
 background:white;border-radius:12px;text-align:center}}
-.status{{font-size:14px;color:#6b7280}}
-footer{{margin-top:auto;background:#15345c;color:white;
-padding:2vh 2vw;border-radius:8px;display:flex;
+
+footer{{background:#15345c;color:white;
+padding:1.8vh 2vw;border-radius:8px;display:flex;
 justify-content:space-between;font-size:clamp(13px,1.8vw,28px);
-font-weight:700}}
+font-weight:700;flex-shrink:0}}
+
 </style>
 </head>
 <body>
@@ -204,13 +281,38 @@ font-weight:700}}
 <div class="subtitle">WEDSTRIJDPROGRAMMA</div>
 </div>
 </header>
-<section class="list">{rows_html}</section>
-{status}
+
+<section class="content">
+{day_html}
+</section>
+
 <footer>
 <span>Kom onze teams aanmoedigen!</span>
 <span>kvjuliana.nl</span>
 </footer>
 </main>
+
+<script>
+document.querySelectorAll('.day[data-pages]').forEach(day => {{
+    const pages = day.querySelectorAll('.page');
+    const total = pages.length;
+
+    if (total <= 1) return;
+
+    let current = 0;
+    const label = day.querySelector('.page-label');
+
+    setInterval(() => {{
+        pages[current].classList.remove('active');
+        current = (current + 1) % total;
+        pages[current].classList.add('active');
+
+        if (label) {{
+            label.textContent = `Pagina ${{current + 1}}/${{total}}`;
+        }}
+    }}, {PAGE_INTERVAL_SECONDS * 1000});
+}});
+</script>
 </body>
 </html>"""
 
@@ -219,6 +321,7 @@ font-weight:700}}
         json.dumps(matches, ensure_ascii=False, indent=2),
         encoding="utf-8"
     )
+
 
 def main():
     today = datetime.now(TZ).date()
@@ -236,6 +339,7 @@ def main():
     render(matches)
     print(f"Rows collected: {len(rows)}")
     print(f"Matches found: {len(matches)}")
+
 
 if __name__ == "__main__":
     main()
