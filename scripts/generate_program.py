@@ -16,15 +16,13 @@ OUT.mkdir(exist_ok=True)
 
 MONTHS = {
     "jan": 1, "feb": 2, "mrt": 3, "mar": 3,
-    "apr": 4, "mei": 5, "jun": 6,
-    "jul": 7, "aug": 8, "sep": 9,
-    "okt": 10, "nov": 11, "dec": 12,
+    "apr": 4, "mei": 5, "jun": 6, "jul": 7,
+    "aug": 8, "sep": 9, "okt": 10, "nov": 11, "dec": 12,
 }
 
 def parse_date(value, today):
-    value = value.lower().strip().replace(".", "")
+    value = value.lower().strip()
 
-    # Datum met jaar, bijvoorbeeld 28-11-2026
     m = re.search(r"(\d{1,2})[-/](\d{1,2})[-/](20\d{2})", value)
     if m:
         try:
@@ -32,7 +30,6 @@ def parse_date(value, today):
         except ValueError:
             return None
 
-    # Nederlandse datum, bijvoorbeeld 28 nov
     m = re.search(r"(\d{1,2})\s+([a-z]+)", value)
     if m:
         month = MONTHS.get(m.group(2)[:3])
@@ -45,26 +42,18 @@ def parse_date(value, today):
                 return d
             except ValueError:
                 return None
-
     return None
 
 def get_rows():
-    url = CFG["source_url"]
-
     with sync_playwright() as p:
         browser = p.chromium.launch()
         page = browser.new_page()
-        page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        page.goto(CFG["source_url"], wait_until="domcontentloaded", timeout=60000)
         page.wait_for_timeout(8000)
 
-        # Verzamel tabelregels en hun cellen uit de geladen pagina
-        data = page.evaluate("""() => {
-            const output = [];
-            const selectors = ['tr', '[role="row"]'];
-
-            const elements = [...new Set(
-                selectors.flatMap(s => [...document.querySelectorAll(s)])
-            )];
+        rows = page.evaluate("""() => {
+            const all = [];
+            const elements = [...document.querySelectorAll('tr, [role="row"]')];
 
             for (const row of elements) {
                 const cells = [...row.querySelectorAll(
@@ -72,68 +61,82 @@ def get_rows():
                 )];
 
                 if (cells.length >= 2) {
-                    output.push(cells.map(c => c.innerText.trim()));
+                    all.push(cells.map(c => c.innerText.trim()));
                 }
             }
-
-            return output;
+            return all;
         }""")
 
         html = page.content()
         browser.close()
 
-    return data, html
+    return rows, html
 
 def find_matches(rows, today):
     matches = []
     diagnostics = []
-
-    current_date = None
     end_date = today + timedelta(days=int(CFG.get("lookahead_days", 7)))
 
+    # Vind de header met de kolommen DATUM, TIJD, THUIS en UIT
+    header = None
     for cells in rows:
-        text = " | ".join(cells)
-        diagnostics.append({"cells": cells})
+        normalized = [c.strip().lower() for c in cells]
+        if any("thuis" in c for c in normalized) and any("uit" == c or c.endswith(" uit") for c in normalized):
+            header = normalized
+            break
 
-        # Zoek een datum in de rij
-        row_date = None
-        for cell in cells:
-            row_date = parse_date(cell, today)
-            if row_date:
-                break
+    if not header:
+        return [], [{"error": "Header met THUIS en UIT niet gevonden", "rows": rows}]
 
-        if row_date:
-            current_date = row_date
+    date_idx = next((i for i, c in enumerate(header) if "datum" in c), None)
+    time_idx = next((i for i, c in enumerate(header) if "tijd" in c), None)
+    home_idx = next((i for i, c in enumerate(header) if "thuis" in c), None)
+    away_idx = next((i for i, c in enumerate(header) if c == "uit" or c.endswith(" uit")), None)
 
-        # Zoek een tijd in de rij
-        time_value = next(
-            (c for c in cells if re.fullmatch(r"\d{1,2}:\d{2}", c)),
-            None
-        )
+    if None in (date_idx, time_idx, home_idx, away_idx):
+        return [], [{"error": "Kolomindex niet gevonden", "header": header}]
 
-        # Zoek de teamkolommen op basis van de inhoud
-        # Juliana moet in de thuis-teamkolom staan.
-        if current_date and time_value:
-            team_cells = [
-                c for c in cells
-                if re.search(r"\bJuliana\b", c, re.IGNORECASE)
-            ]
+    for cells in rows:
+        if len(cells) <= max(date_idx, time_idx, home_idx, away_idx):
+            continue
 
-            if team_cells:
-                # Controleer of Juliana in een wedstrijdregel staat.
-                # Een teamnaam wordt alleen als thuis beschouwd als
-                # hij in de tabel vóór het uit-team staat.
-                juliana_index = next(
-                    (i for i, c in enumerate(cells)
-                     if re.search(r"\bJuliana\b", c, re.IGNORECASE)),
-                    -1
-                )
+        datum = cells[date_idx].strip()
+        tijd = cells[time_idx].strip()
+        thuis = cells[home_idx].strip()
+        uit = cells[away_idx].strip()
 
-                # Regels met Juliana en een tijd worden diagnostisch
-                # geregistreerd; de kolomcontrole wordt hieronder
-                # verder verfijnd op basis van de header.
-                diagnostics[-1]["juliana_index"] = juliana_index
+        parsed = parse_date(datum, today)
 
+        record = {
+            "cells": cells,
+            "date": datum,
+            "time": tijd,
+            "home": thuis,
+            "away": uit,
+            "parsed_date": str(parsed) if parsed else None,
+        }
+        diagnostics.append(record)
+
+        if not parsed or not re.fullmatch(r"\d{1,2}:\d{2}", tijd):
+            continue
+
+        if not (today <= parsed <= end_date):
+            continue
+
+        if "juliana" not in thuis.lower():
+            continue
+
+        if not thuis or not uit:
+            continue
+
+        matches.append({
+            "date": parsed.strftime("%d-%m-%Y"),
+            "time": tijd,
+            "home": thuis,
+            "away": uit,
+        })
+
+    matches.sort(key=lambda x: (x["date"], x["time"]))
     return matches, diagnostics
 
 def render(matches):
