@@ -13,7 +13,7 @@ TZ = ZoneInfo(CFG.get("timezone", "Europe/Amsterdam"))
 OUT = ROOT / "site"
 OUT.mkdir(exist_ok=True)
 
-MAX_MATCHES_PER_PAGE = 5
+MAX_MATCHES_PER_PAGE = 4
 PAGE_INTERVAL_SECONDS = 12
 
 MONTHS = {
